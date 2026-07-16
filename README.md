@@ -136,16 +136,15 @@ Gartley, Butterfly, Crab, Shark, Cypher, AB=CD, XAB=XCD, Fibonacci ratios, etc.
 - Drawdown monitoring
 
 ## 🛠️ نصب و راه‌اندازی
-
 ### الزامات
 - Python 3.10+
-- Ollama (برای Llama و Mistral)
+- LM Studio (به عنوان سرور محلی استنتاج هوش مصنوعی)
 - Binance API Keys
 - 16GB+ RAM
+- کارت گرافیک NVIDIA (ترجیحاً سری RTX با حداقل 12GB VRAM برای اجرای روان مدل‌های 8B و 7B)
 
 ### مراحل نصب
 
-```bash
 # 1. Clone repository
 git clone https://github.com/rnosrati1989-bot/crypto-signal-detection.git
 cd crypto-signal-detection
@@ -157,15 +156,16 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Setup Ollama
-# Download and install Ollama from https://ollama.ai
-# Run models:
-ollama run llama-3-8b
-ollama run mistral-7b
+# 4. Setup LM Studio & Models
+# 1. نرم‌افزار LM Studio را از سایت رسمی (https://lmstudio.ai) دانلود و نصب کنید.
+# 2. مدل‌های Llama 3 8B و Mistral 7B را از داخل محیط LM Studio جستجو و دانلود کنید.
+# 3. به بخش "Local Server" (آیکون <-> در منوی سمت چپ) بروید.
+# 4. مدل دانلود شده را در بالا انتخاب و لود کنید.
+# 5. بر روی دکمه "Start Server" کلیک کنید تا سرور محلی روی پورت 1234 (HTTP) فعال شود.
 
 # 5. Configure environment
 cp .env.example .env
-# Edit .env with your Binance API keys and settings
+# فایل .env را باز کرده و کلیدهای Binance و آدرس محلی سرور LM Studio را وارد کنید.
 
 # 6. Run the system
 python main.py

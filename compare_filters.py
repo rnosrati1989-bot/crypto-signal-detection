@@ -25,10 +25,32 @@ from pathlib import Path
 
 from backtest import run_backtest
 from data.binance_client import BinanceDataClient
-from core_pipeline import build_full_pipeline
+from indicators.trend import TrendIndicators
+from indicators.momentum import MomentumIndicators
+from indicators.volatility import VolatilityIndicators
+from indicators.volume import VolumeIndicators
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("CompareFilters")
+
+
+def prepare_data(symbol: str, timeframe: str, limit: int = 1000):
+    """
+    دریافت داده و محاسبه همه اندیکاتورها
+    """
+    client = BinanceDataClient()
+    df = client.get_historical_klines(symbol=symbol, interval=timeframe, limit=limit)
+    
+    if df.empty:
+        return None
+    
+    # محاسبه اندیکاتورها
+    df = TrendIndicators.calculate_all_trend(df)
+    df = MomentumIndicators.calculate_all_momentum(df)
+    df = VolatilityIndicators.calculate_all_volatility(df)
+    df = VolumeIndicators.calculate_all_volume(df)
+    
+    return df
 
 
 def run_single_comparison(symbol: str, timeframe: str, rr: float, limit: int = 1000) -> dict:
@@ -44,16 +66,12 @@ def run_single_comparison(symbol: str, timeframe: str, rr: float, limit: int = 1
     logger.info(f"📊 Comparing {symbol}/{timeframe} (RR={rr}) — With vs Without Regime Filters")
     logger.info(f"{'='*100}")
     
-    # دریافت داده‌ها (یکبار برای هر دو حالت)
-    client = BinanceDataClient()
-    df_raw = client.get_historical_klines(symbol=symbol, interval=timeframe, limit=limit)
+    # دریافت داده‌ها و محاسبه اندیکاتورها (یکبار برای هر دو حالت)
+    df_full = prepare_data(symbol, timeframe, limit)
     
-    if df_raw.empty:
+    if df_full is None or df_full.empty:
         logger.error(f"خطا: داده برای {symbol}/{timeframe} دریافت نشد.")
         return None
-    
-    # محاسبه اندیکاتورها (یکبار برای هر دو حالت)
-    df_full = build_full_pipeline(df_raw)
     
     # ۱. بک‌تست بدون فیلتر
     logger.info("\n🔵 Running backtest WITHOUT regime filters...")
@@ -233,7 +251,7 @@ if __name__ == "__main__":
         {"symbol": "BTCUSDT", "timeframe": "15m", "rr": 2.0},
     ]
     
-    # اجرای مقایس�� روی همه‌ی سناریوها
+    # اجرای مقایسه روی همه‌ی سناریوها
     all_results = []
     
     for scenario in stable_scenarios:

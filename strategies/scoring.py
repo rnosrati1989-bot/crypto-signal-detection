@@ -11,11 +11,10 @@ class RegimeFilter:
     
     بر اساس نتایج Walk-Forward، سیستم فقط در شرایط خاصی edge داره:
     - روند قوی (ADX > 25)
-    - حجم معاملات بالا (تایید جریان پول)
-    - نوسان در حال افزایش (ATR صعودی)
-    - هم‌راستایی EMA ها
+    - نوسان کافی (ATR > 1%, BB Width > 0.015)
+    - هم‌راستایی نسبی EMA ها (حداقل 2 از 3)
     
-    اگر این شرایط برقرار نباشه، سیگنال HOLD صادر میشه (حتی اگر اسکور بالا باشه).
+    نسخه 2: فیلترهای انعطاف‌پذیرتر (حذف VROC و CMF که خیلی سخت بودن)
     """
     
     @staticmethod
@@ -28,41 +27,13 @@ class RegimeFilter:
         """
         adx = row.get('ADX_14', 0)
         if adx < min_adx:
-            return False, f"ADX={adx:.1f} < {min_adx} (روند ضعیف، احتمال whipsaw بالا)"
+            return False, f"ADX={adx:.1f} < {min_adx} (روند ضعیف)"
         return True, f"ADX={adx:.1f} ✓"
-    
-    @staticmethod
-    def check_volume_filter(row, lookback: int = 20) -> tuple:
-        """
-        فیلتر حجم: حجم فعلی باید بالاتر از میانگین باشه
-        
-        نکته: این فیلتر نیاز به دسترسی به داده‌های قبلی داره، پس در backtest
-        باید کل دیتافریم رو پاس بدیم. فعلاً از VROC (Volume Rate of Change) استفاده می‌کنیم
-        که خودش یه proxy برای تغییرات حجمه.
-        
-        Returns:
-            (passed: bool, reason: str)
-        """
-        vroc = row.get('VROC', 0)
-        cmf = row.get('CMF', 0)
-        
-        # حجم باید مثبت باشه (VROC > 0) و جریان پول هم مثبت (CMF > 0)
-        if vroc < 0:
-            return False, f"VROC={vroc:.1f}% (حجم در حال کاهش)"
-        
-        if cmf < 0:
-            return False, f"CMF={cmf:.3f} (جریان پول منفی)"
-        
-        return True, f"VROC={vroc:.1f}%, CMF={cmf:.3f} ✓"
     
     @staticmethod
     def check_volatility_expansion(row) -> tuple:
         """
-        فیلتر نوسان: ATR نباید در حال کاهش باشه (نشانه‌ی فشردگی بازار)
-        
-        نکته: برای چک کردن "ATR در حال افزایش" نیاز به ATR قبلی داریم.
-        فعلاً از BB Width استفاده می‌کنیم: اگر خیلی کم باشه (< 0.015) یعنی
-        بازار فشرده شده و احتمال false signal بالاست.
+        فیلتر نوسان: ATR نباید خیلی کم باشه
         
         Returns:
             (passed: bool, reason: str)
@@ -72,23 +43,17 @@ class RegimeFilter:
         close = row.get('close', 1)
         atr_pct = (atr / close * 100) if close > 0 else 0
         
-        # اگر BB Width خیلی کم باشه (فشردگی شدید)، ممکنه بازار در حال consolidation باشه
-        if bb_width < 0.015:
-            return False, f"BB_Width={bb_width:.4f} (بازار خیلی فشرده، احتمال false breakout)"
-        
-        # ATR باید حداقل 1% قیمت باشه (برای اطمینان از نوسان کافی)
-        if atr_pct < 1.0:
-            return False, f"ATR={atr_pct:.2f}% (نوسان خیلی کم)"
+        # شرایط تسهیل‌شده: یکی از دو شرط کافیه
+        if bb_width < 0.010:  # کاهش از 0.015 به 0.010
+            if atr_pct < 0.8:  # کاهش از 1.0 به 0.8
+                return False, f"BB_Width={bb_width:.4f} و ATR={atr_pct:.2f}% (هر دو خیلی کم)"
         
         return True, f"BB_Width={bb_width:.4f}, ATR={atr_pct:.2f}% ✓"
     
     @staticmethod
     def check_trend_alignment(row, regime_info: dict) -> tuple:
         """
-        فیلتر هم‌راستایی EMA: تمام EMA ها باید به یک سمت باشن
-        
-        برای BUY: EMA_9 > EMA_21 > EMA_50 > EMA_200 (همه صعودی)
-        برای SELL: EMA_9 < EMA_21 < EMA_50 < EMA_200 (همه نزولی)
+        فیلتر هم‌راستایی EMA: حداقل 2 از 3 EMA باید هم‌راستا باشن (تسهیل‌شده)
         
         Returns:
             (passed: bool, reason: str, allowed_direction: str)
@@ -96,31 +61,48 @@ class RegimeFilter:
         ema_9 = row.get('EMA_9', 0)
         ema_21 = row.get('EMA_21', 0)
         ema_50 = row.get('EMA_50', 0)
-        ema_200 = row.get('EMA_200', 0)
         close = row.get('close', 0)
         
-        # چک کردن ترتیب کامل EMA ها
-        bullish_alignment = ema_9 > ema_21 > ema_50 and close > ema_50
-        bearish_alignment = ema_9 < ema_21 < ema_50 and close < ema_50
+        # چک کردن ترتیب کامل (ایده‌آل)
+        perfect_bullish = ema_9 > ema_21 > ema_50 and close > ema_50
+        perfect_bearish = ema_9 < ema_21 < ema_50 and close < ema_50
         
-        if bullish_alignment:
-            return True, "EMA Bullish Alignment ✓", "BUY"
-        elif bearish_alignment:
-            return True, "EMA Bearish Alignment ✓", "SELL"
+        if perfect_bullish:
+            return True, "EMA Perfect Bullish ✓", "BUY"
+        elif perfect_bearish:
+            return True, "EMA Perfect Bearish ✓", "SELL"
+        
+        # چک کردن هم‌راستایی جزئی (حداقل 2 از 3)
+        bullish_count = sum([
+            ema_9 > ema_21,
+            ema_21 > ema_50,
+            close > ema_21
+        ])
+        
+        bearish_count = sum([
+            ema_9 < ema_21,
+            ema_21 < ema_50,
+            close < ema_21
+        ])
+        
+        if bullish_count >= 2:
+            return True, f"EMA Partial Bullish ({bullish_count}/3) ✓", "BUY"
+        elif bearish_count >= 2:
+            return True, f"EMA Partial Bearish ({bearish_count}/3) ✓", "SELL"
         else:
-            return False, "EMA ها هم‌راستا نیستن (احتمال بازار رنج/تردید)", "HOLD"
+            return False, "EMA ها هم‌راستا نیستن (بازار مردد)", "HOLD"
     
     @staticmethod
     def apply_filters(row, regime_info: dict, enable_filters: bool = True, 
                      min_adx: float = 25.0) -> dict:
         """
-        اعمال تمام فیلترها و برگردوندن نتیجه
+        اعمال فیلترهای انعطاف‌پذیر (نسخه 2)
         
-        Args:
-            row: ردیف دیتافریم (آخرین کندل)
-            regime_info: اطلاعات رژیم بازار (از MarketRegime.detect)
-            enable_filters: فعال/غیرفعال کردن فیلترها (برای مقایسه)
-            min_adx: حداقل ADX برای pass شدن فیلتر
+        تغییرات نسبت به نسخه 1:
+        - ❌ حذف: VROC و CMF (خیلی سخت بودن)
+        - ✅ نگهداری: ADX >= 25
+        - ✅ تسهیل: BB Width و ATR (آستانه‌های پایین‌تر)
+        - ✅ تسهیل: EMA Alignment (حداقل 2 از 3 به‌جای 3 از 3)
         
         Returns:
             dict با کلیدها:
@@ -140,25 +122,19 @@ class RegimeFilter:
         all_passed = True
         allowed_direction = "ANY"
         
-        # ۱. فیلتر ADX
+        # ۱. فیلتر ADX (بدون تغییر)
         adx_pass, adx_reason = RegimeFilter.check_adx_filter(row, min_adx=min_adx)
         reasons.append(f"ADX: {adx_reason}")
         if not adx_pass:
             all_passed = False
         
-        # ۲. فیلتر حجم
-        vol_pass, vol_reason = RegimeFilter.check_volume_filter(row)
-        reasons.append(f"Volume: {vol_reason}")
-        if not vol_pass:
-            all_passed = False
-        
-        # ۳. فیلتر نوسان
+        # ۲. فیلتر نوسان (تسهیل‌شده)
         vola_pass, vola_reason = RegimeFilter.check_volatility_expansion(row)
         reasons.append(f"Volatility: {vola_reason}")
         if not vola_pass:
             all_passed = False
         
-        # ۴. فیلتر هم‌راستایی EMA (این یکی direction هم برمی‌گردونه)
+        # ۳. فیلتر هم‌راستایی EMA (تسهیل‌شده: حداقل 2 از 3)
         align_pass, align_reason, align_dir = RegimeFilter.check_trend_alignment(row, regime_info)
         reasons.append(f"Trend: {align_reason}")
         if not align_pass:
@@ -186,7 +162,7 @@ class MarketRegime:
     تشخیص رژیم بازار: این کلاس تشخیص می‌دهد که آیا بازار در روند صعودی/نزولی قوی است،
     یا در رنج (نوسان بدون جهت مشخص)، یا در وضعیت نوسان بالا.
     
-    این تشخیص به ��ا کمک می‌کند که وزن اندیکاتورها را متناسب با رژیم تنظیم کنیم.
+    این تشخیص به ما کمک می‌کند که وزن اندیکاتورها را متناسب با رژیم تنظیم کنیم.
     """
     
     @staticmethod
@@ -247,12 +223,12 @@ class SignalScorer:
     2. Confluence (همگرایی چند اندیکاتور)
     3. آستانه‌های پویا بر اساس قدرت روند
     4. منطق SHORT و LONG متوازن
-    5. فیلترهای رژیم بازار (جدید!)
+    5. فیلترهای رژیم بازار (نسخه 2: انعطاف‌پذیرتر!)
     """
     
     # وزن‌های پایه (در رژیم strong_trend)
     WEIGHTS_STRONG_TREND = {
-        "trend": 0.45,      # در روند قوی، اندیکاتورهای روند مهم‌ترن��
+        "trend": 0.45,      # در روند قوی، اندیکاتورهای روند مهم‌ترند
         "momentum": 0.25,
         "volatility": 0.15,
         "volume": 0.15
@@ -488,7 +464,7 @@ class SignalScorer:
     def score_row(row, buy_threshold: float = None, sell_threshold: float = None,
                   enable_regime_filter: bool = True, min_adx: float = 25.0) -> dict:
         """
-        محاسبه اسکور پیشرفته با توجه به رژیم بازار + فیلترهای اضافی
+        محاسبه اسکور پیشرفته با توجه به رژیم بازار + فیلترهای اضافی (نسخه 2)
         
         Args:
             enable_regime_filter: فعال/غیرفعال کردن فیلتر رژیم (برای مقایسه)
@@ -500,7 +476,7 @@ class SignalScorer:
         regime_info = MarketRegime.detect(row)
         regime = regime_info['regime']
         
-        # ۲. اعمال فیلترهای رژیم بازار (جدید!)
+        # ۲. اعمال فیلترهای رژیم بازار (نسخه 2: انعطاف‌پذیرتر!)
         filter_result = RegimeFilter.apply_filters(
             row, regime_info, 
             enable_filters=enable_regime_filter,
@@ -556,7 +532,7 @@ class SignalScorer:
                 buy_threshold = 70
                 sell_threshold = 30
         
-        # ۹. تصمیم‌گیری نهایی (با در نظر گرفتن فیلترها)
+        # ۹. تص��یم‌گیری نهایی (با در نظر گرفتن فیلترها)
         direction = "HOLD"
         confidence = abs(final_score) / 100  # 0 تا 1
         

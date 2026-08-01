@@ -11,7 +11,7 @@ backtest.py
    حالت زنده (main.py/multi_run.py) استفاده میشه، بدون هیچ تفاوتی.
 4. وقتی سیگنال BUY/SELL ظاهر بشه و پوزیشنی باز نباشه، در کندلِ بعدی وارد
    معامله می‌شیم (برای جلوگیری از look-ahead bias). خروج بر اساس Stop-Loss/
-   Take-Profit مبتنی بر ATR انجام میشه، یا با ظاهر شدن سیگنال مخالف.
+   Take-Profit مبتنی بر ATR انجام میشه، ی�� با ظاهر شدن سیگنال مخالف.
 5. آمار استاندارد: تعداد معاملات، Win Rate، R میانگین، Expectancy،
    Profit Factor و Max Drawdown محاسبه و چاپ میشه.
 
@@ -62,6 +62,7 @@ def run_backtest(
     buy_threshold: float = 70,
     sell_threshold: float = 30,
     regime_adx_min: float = 0,
+    enable_regime_filter: bool = None,
 ) -> dict:
     """
     اجرای شبیه‌سازی معاملات بر اساس سیگنال‌های SignalScorer.
@@ -73,9 +74,15 @@ def run_backtest(
     :param sell_threshold: آستانه‌ی امتیاز برای صدور سیگنال فروش
     :param regime_adx_min: اگر > 0 باشه، فقط وقتی ADX_14 >= این مقدار (یعنی بازار روند‌دار
                             تشخیص داده بشه) اجازه‌ی ورود به معامله صادر میشه. ۰ = بدون فیلتر رژیم.
+    :param enable_regime_filter: فعال/غیرفعال کردن فیلترهای پیشرفته RegimeFilter در scoring.py
+                                 اگر None باشه، خودکار بر اساس regime_adx_min تنظیم میشه.
     """
     if len(df) <= warmup + 2:
         raise RuntimeError("داده‌ی کافی برای بک‌تست (بعد از warm-up) وجود ندارد.")
+
+    # اگر enable_regime_filter مشخص نشده، خودکار تنظیم می‌کنیم
+    if enable_regime_filter is None:
+        enable_regime_filter = (regime_adx_min > 0)
 
     trades = []
     position = None  # dict: direction, entry_price, sl, tp, entry_index, entry_time
@@ -128,13 +135,20 @@ def run_backtest(
 
         # --- اگر پوزیشنی باز نیست، بررسی سیگنال ورود ---
         if position is None:
-            # فیلتر رژیم بازار (اختیاری): فقط وقتی روند به‌اندازه‌ی کافی قویه وارد شو
+            # فیلتر رژیم بازار (اختیاری - legacy): فقط وقتی روند به‌اندازه‌ی کافی قویه وارد شو
             if regime_adx_min > 0:
                 adx_val = row.get("ADX_14", 0)
                 if pd.isna(adx_val) or adx_val < regime_adx_min:
                     continue
 
-            score_result = SignalScorer.score_row(row, buy_threshold=buy_threshold, sell_threshold=sell_threshold)
+            # محاسبه اسکور با فیلترهای پیشرفته (اگر فعال باشه)
+            score_result = SignalScorer.score_row(
+                row, 
+                buy_threshold=buy_threshold, 
+                sell_threshold=sell_threshold,
+                enable_regime_filter=enable_regime_filter,
+                min_adx=regime_adx_min if regime_adx_min > 0 else 25.0
+            )
             direction = score_result["direction"]
 
             if direction in ("BUY", "SELL"):

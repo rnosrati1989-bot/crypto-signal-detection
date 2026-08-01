@@ -6,8 +6,8 @@ compare_filters.py
 این اسکریپت:
 1. بهترین 4 سناریوی STABLE رو از Walk-Forward می‌گیره
 2. هر کدوم رو دوبار بک‌تست می‌کنه:
-   - بدون فیلتر (enable_regime_filter=False)
-   - با فیلتر (enable_regime_filter=True)
+   - بدون فیلتر (regime_adx_min=0)
+   - با فیلتر (regime_adx_min=25)
 3. نتایج رو در یک جدول مقایسه‌ای نشون می‌ده
 
 هدف: اثبات این‌که فیلترها سیگنال‌های بی‌کیفیت رو حذف می‌کنن
@@ -15,7 +15,6 @@ compare_filters.py
 
 اجرا:
     python compare_filters.py
-    python compare_filters.py --symbols BTCUSDT ETHUSDT --timeframes 15m 1h
 """
 
 import argparse
@@ -77,24 +76,22 @@ def run_single_comparison(symbol: str, timeframe: str, rr: float, limit: int = 1
     logger.info("\n🔵 Running backtest WITHOUT regime filters...")
     results_no_filter = run_backtest(
         df=df_full,
-        atr_multiplier=1.5,
-        risk_reward_ratio=rr,
-        enable_regime_filter=False,  # فیلترها خاموش
+        atr_sl_mult=1.5,
+        risk_reward=rr,
         buy_threshold=70.0,
         sell_threshold=30.0,
-        min_regime_adx=25.0
+        regime_adx_min=0.0  # فیلترها خاموش
     )
     
     # ۲. بک‌تست با فیلتر
     logger.info("\n🟢 Running backtest WITH regime filters...")
     results_with_filter = run_backtest(
         df=df_full,
-        atr_multiplier=1.5,
-        risk_reward_ratio=rr,
-        enable_regime_filter=True,  # فیلترها روشن
+        atr_sl_mult=1.5,
+        risk_reward=rr,
         buy_threshold=70.0,
         sell_threshold=30.0,
-        min_regime_adx=25.0
+        regime_adx_min=25.0  # فیلترها روشن
     )
     
     return {
@@ -113,27 +110,27 @@ def calculate_improvement(without: dict, with_f: dict) -> dict:
     Returns:
         dict با کلیدها:
         - trades_change_pct: تغییر درصدی تعداد معاملات
-        - win_rate_change_pct: تغییر درصدی win rate
+        - win_rate_change_pp: تغییر win rate (percentage points)
         - avg_r_change_pct: تغییر درصدی avg R
     """
     if not without or not with_f:
-        return {"trades_change_pct": 0, "win_rate_change_pct": 0, "avg_r_change_pct": 0}
+        return {"trades_change_pct": 0, "win_rate_change_pp": 0, "avg_r_change_pct": 0}
     
     trades_no = without.get("total_trades", 0)
     trades_yes = with_f.get("total_trades", 0)
     trades_change = ((trades_yes - trades_no) / trades_no * 100) if trades_no > 0 else 0
     
-    wr_no = without.get("win_rate", 0)
-    wr_yes = with_f.get("win_rate", 0)
-    wr_change = (wr_yes - wr_no) if wr_no > 0 else 0
+    wr_no = without.get("win_rate_pct", 0)
+    wr_yes = with_f.get("win_rate_pct", 0)
+    wr_change = (wr_yes - wr_no)
     
-    avgr_no = without.get("avg_r", 0)
-    avgr_yes = with_f.get("avg_r", 0)
+    avgr_no = without.get("avg_r_multiple", 0)
+    avgr_yes = with_f.get("avg_r_multiple", 0)
     avgr_change = ((avgr_yes - avgr_no) / abs(avgr_no) * 100) if avgr_no != 0 else 0
     
     return {
         "trades_change_pct": round(trades_change, 1),
-        "win_rate_change_pp": round(wr_change, 1),  # percentage points
+        "win_rate_change_pp": round(wr_change, 1),
         "avg_r_change_pct": round(avgr_change, 1)
     }
 
@@ -168,15 +165,15 @@ def print_comparison_table(results: list):
             
             # بدون فیلتر
             "NoFilter_Trades": no_f.get("total_trades", 0),
-            "NoFilter_WinRate": round(no_f.get("win_rate", 0), 1),
-            "NoFilter_AvgR": round(no_f.get("avg_r", 0), 3),
-            "NoFilter_PF": round(no_f.get("profit_factor", 0), 2),
+            "NoFilter_WinRate": round(no_f.get("win_rate_pct", 0), 1),
+            "NoFilter_AvgR": round(no_f.get("avg_r_multiple", 0), 3),
+            "NoFilter_PF": round(no_f.get("profit_factor", 0), 2) if no_f.get("profit_factor") != "inf" else "inf",
             
             # با فیلتر
             "WithFilter_Trades": yes_f.get("total_trades", 0),
-            "WithFilter_WinRate": round(yes_f.get("win_rate", 0), 1),
-            "WithFilter_AvgR": round(yes_f.get("avg_r", 0), 3),
-            "WithFilter_PF": round(yes_f.get("profit_factor", 0), 2),
+            "WithFilter_WinRate": round(yes_f.get("win_rate_pct", 0), 1),
+            "WithFilter_AvgR": round(yes_f.get("avg_r_multiple", 0), 3),
+            "WithFilter_PF": round(yes_f.get("profit_factor", 0), 2) if yes_f.get("profit_factor") != "inf" else "inf",
             
             # بهبود
             "Improvement_Trades": improvement["trades_change_pct"],
@@ -233,12 +230,6 @@ def print_comparison_table(results: list):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="مقایسه‌ی عملکرد با و بدون فیلتر رژیم بازار")
-    parser.add_argument("--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT"],
-                        help="لیست نمادها برای تست")
-    parser.add_argument("--timeframes", nargs="+", default=["15m", "1h"],
-                        help="لیست تایم‌فریم‌ها برای تست")
-    parser.add_argument("--rrs", nargs="+", type=float, default=[1.5, 2.0, 3.0],
-                        help="لیست Risk:Reward ratios برای تست")
     parser.add_argument("--limit", type=int, default=1000,
                         help="تعداد کندل‌های تاریخی")
     args = parser.parse_args()

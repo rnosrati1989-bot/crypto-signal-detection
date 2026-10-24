@@ -1,0 +1,11 @@
+metric,value
+actual_best_expectancy_pct,0.25617329695438334
+actual_best_adx,30.0
+actual_trades,94.0
+n_permutations,200.0
+p_value,0.004975124378109453
+null_mean_pct,0.10233710388986632
+null_p90_pct,0.17222541109728018
+null_p95_pct,0.1879946018714872
+null_p99_pct,0.2145250378280552
+null_max_pct,0.2543054929745112

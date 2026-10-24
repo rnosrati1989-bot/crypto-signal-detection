@@ -1,0 +1,42 @@
+{
+  "LINKUSDT": {
+    "bar_time": "2026-10-24 02:30:00",
+    "side": "HOLD",
+    "mom": "LONG"
+  },
+  "NEARUSDT": {
+    "bar_time": "2026-10-23 19:00:00",
+    "side": "HOLD",
+    "mom": "SHORT"
+  },
+  "SOLUSDT": {
+    "bar_time": "2026-10-23 19:45:00",
+    "side": "HOLD",
+    "mom": "SHORT"
+  },
+  "BNBUSDT": {
+    "bar_time": "2026-10-23 19:45:00",
+    "side": "HOLD",
+    "mom": "SHORT"
+  },
+  "BTCUSDT": {
+    "bar_time": "2026-10-23 19:00:00",
+    "side": "HOLD",
+    "mom": "SHORT"
+  },
+  "ETHUSDT": {
+    "bar_time": "2026-10-23 19:45:00",
+    "side": "HOLD",
+    "mom": "SHORT"
+  },
+  "DOGEUSDT": {
+    "bar_time": "2026-10-23 19:00:00",
+    "side": "HOLD",
+    "mom": "SHORT"
+  },
+  "XRPUSDT": {
+    "bar_time": "2026-10-23 19:00:00",
+    "side": "HOLD",
+    "mom": "SHORT"
+  }
+}

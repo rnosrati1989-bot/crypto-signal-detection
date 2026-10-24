@@ -1,0 +1,408 @@
+diff -ruN '--exclude=__pycache__' orig/features.py b/features.py
+--- a/features.py	2026-10-10 20:47:26.174604252 +0000
++++ b/features.py	2026-10-10 21:05:34.797784000 +0000
+@@ -60,6 +60,15 @@
+                            "SUPERTREND", "PSAR")
+ 
+ 
++# تاخیر تأییدِ swing (باید با swing_window در PatternDetector.get_all_chart_patterns
++# یکی باشد؛ پیش‌فرض آن 5 است).
++SWING_CONFIRM_LAG = 5
++
++
++# ستون‌هایی که اطلاعات آینده دارند و باید همیشه حذف شوند
++LEAKY_PREFIXES = ("ICS_",)
++
++
+ def _is_datetime_index(df: pd.DataFrame) -> bool:
+     return isinstance(df.index, pd.DatetimeIndex)
+ 
+@@ -220,7 +229,11 @@
+     if include_chart_patterns and _is_datetime_index(df):
+         try:
+             from strategies.patterns import PatternDetector as _PDC
+-            pats = _PDC.get_all_chart_patterns(df)
++            # فقط تشخیص‌دهنده‌هایی که کل تاریخچه را اسکن می‌کنند (Double Top/Bottom، H&S).
++            # مثلث/Flag/Pennant/Gartley فقط «انتهای داده» را می‌بینند → در آموزش تقریباً
++            # هرگز روشن نمی‌شدند ولی در حالت زنده روی آخرین کندل روشن می‌شدند (train/serve skew).
++            pats = (_PDC.detect_double_top_bottom(df, swing_window=SWING_CONFIRM_LAG)
++                    + _PDC.detect_head_and_shoulders(df, swing_window=SWING_CONFIRM_LAG))
+             if pats:
+                 if not df.index.is_monotonic_increasing:
+                     df = df.sort_index()
+@@ -232,8 +245,12 @@
+                 ok = ~pd.isna(ends)
+                 ends, dirs = ends[ok], dirs[ok]
+                 if len(ends):
+-                    pos = np.clip(df.index.searchsorted(pd.DatetimeIndex(ends)),
+-                                  0, len(df) - 1)
++                    # 🔒 ضدِ look-ahead: swing فقط وقتی تأیید می‌شود که `swing_window`
++                    # کندل بعد از آن هم دیده شده باشد (تعریف مرکزی در find_swing_points).
++                    # پس الگو نباید در زمان خودِ swing، بلکه SWING_CONFIRM_LAG کندل
++                    # بعد از end_time فعال شود.
++                    pos = np.clip(df.index.searchsorted(pd.DatetimeIndex(ends))
++                                  + SWING_CONFIRM_LAG, 0, len(df) - 1)
+                     sig = np.zeros(len(df))
+                     for p, d in zip(pos, dirs):
+                         sig[p] += d
+@@ -286,6 +303,11 @@
+         except Exception as e:  # pragma: no cover
+             logger.warning(f"لایه‌ی رژیم/اسکورینگ به ویژگی اضافه نشد: {e}")
+ 
++    # ۴پ. 🔒 محافظ نهایی: ستون‌های نشتی (Chikou Span = قیمت آینده) هرگز نمی‌مانند
++    leak_cols = [c for c in df.columns if str(c).startswith(LEAKY_PREFIXES)]
++    if leak_cols:
++        df = df.drop(columns=leak_cols)
++
+     # ۵. حذف ستون‌های قیمت مطلق/غیرایستا از ورودی مدل
+     # وقتی include_absolute_levels=True، سطوح مطلق قیمت نگه‌داشته می‌شوند (ورودی مدل)
+     drop_cols = ([] if include_absolute_levels
+diff -ruN '--exclude=__pycache__' orig/indicators/trend.py b/indicators/trend.py
+--- a/indicators/trend.py	2026-10-10 20:47:26.174899600 +0000
++++ b/indicators/trend.py	2026-10-10 20:47:40.372510533 +0000
+@@ -103,6 +103,11 @@
+             # ۷. ابر ایچیموکو (Ichimoku Cloud)
+             ichi_df, ichi_span = ta.ichimoku(df_indicators['high'], df_indicators['low'], df_indicators['close'])
+             if ichi_df is not None:
++                # 🔒 ضدِ look-ahead: ستون Chikou Span (ICS_*) در pandas_ta برابر
++                # close.shift(-25) یعنی «قیمت ۲۵ کندل آینده» است (تست‌شده: ۱۰۰٪ تطابق).
++                # هرگز نباید وارد دیتاست/مدل شود.
++                ichi_df = ichi_df.drop(
++                    columns=[c for c in ichi_df.columns if str(c).startswith("ICS_")])
+                 df_indicators = pd.concat([df_indicators, ichi_df], axis=1)
+ 
+             logger.info("Trend indicators calculated successfully.")
+diff -ruN '--exclude=__pycache__' orig/live_signal.py b/live_signal.py
+--- a/live_signal.py	2026-10-10 20:47:26.175113890 +0000
++++ b/live_signal.py	2026-10-10 20:48:40.069615772 +0000
+@@ -69,6 +69,15 @@
+ 
+     up = lgb.Booster(model_file=os.path.join(models_dir, f"prod_{interval}_up.txt"))
+     dn = lgb.Booster(model_file=os.path.join(models_dir, f"prod_{interval}_dn.txt"))
++
++    # 🔒 مدل‌های قدیمی با ویژگی نشتی (قیمت آینده) آموزش دیده‌اند و در حالت زنده
++    # روی کندل‌های اخیر NaN می‌گیرند → سیگنال بی‌اعتبار. باید دوباره آموزش ببینند.
++    bad = [f for f in list(up.feature_name()) + list(dn.feature_name())
++           if str(f).startswith("ICS_")]
++    if bad:
++        raise RuntimeError(
++            "این مدل با ویژگی نشتی ICS_26 (قیمت آینده) آموزش دیده و نامعتبر است. "
++            "دوباره اجرا کنید: build_dataset.py → train_production_models.py")
+     return meta, up, dn
+ 
+ 
+diff -ruN '--exclude=__pycache__' orig/test_lookahead.py b/test_lookahead.py
+--- a/test_lookahead.py	1970-01-01 00:00:00.000000000 +0000
++++ b/test_lookahead.py	2026-10-10 21:05:34.798499093 +0000
+@@ -0,0 +1,60 @@
++"""
++test_lookahead.py
++-----------------
++تست خودکار look-ahead: هر ویژگی در کندل t باید با «داده تا t» برابر باشد.
++روش: ویژگی‌ها را یک‌بار روی کل داده و یک‌بار روی داده‌ی بریده‌شده تا t می‌سازیم؛
++اگر مقدار ردیف t فرق کرد → آن ستون از آینده استفاده می‌کند.
++
++اجرا:
++    python test_lookahead.py --symbol BTCUSDT --interval 1h --rows 3000
++(به data_cache/{symbol}_{interval}.csv نیاز دارد)
++"""
++import argparse
++import sys
++
++import numpy as np
++import pandas as pd
++
++from features import build_features, get_feature_columns
++
++
++def check(df_raw: pd.DataFrame, cut_points, **kw) -> dict:
++    full = build_features(df_raw, **kw)
++    cols = get_feature_columns(full)
++    bad = {}
++    for t in cut_points:
++        part = build_features(df_raw.iloc[: t + 1], **kw)
++        ts = df_raw.index[t]
++        if ts not in part.index or ts not in full.index:
++            continue
++        a = full.loc[ts, cols].astype(float)
++        b = part.loc[ts, cols].reindex(cols).astype(float)
++        diff = ~np.isclose(a.to_numpy(), b.to_numpy(), rtol=1e-6, atol=1e-9, equal_nan=True)
++        for c in a.index[diff]:
++            bad.setdefault(c, []).append(str(ts))
++    return bad
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--symbol", default="BTCUSDT")
++    ap.add_argument("--interval", default="1h")
++    ap.add_argument("--rows", type=int, default=3000)
++    ap.add_argument("--cuts", type=int, default=8)
++    a = ap.parse_args()
++
++    df = pd.read_csv(f"data_cache/{a.symbol}_{a.interval}.csv",
++                     index_col="timestamp", parse_dates=True).tail(a.rows)
++    cuts = np.linspace(len(df) // 2, len(df) - 60, a.cuts).astype(int)
++    bad = check(df, cuts, include_smart_money=True, include_chart_patterns=True,
++                include_scores=True, include_absolute_levels=True)
++    if bad:
++        print("❌ ستون‌های مشکوک به look-ahead:")
++        for c, ts in sorted(bad.items(), key=lambda kv: -len(kv[1])):
++            print(f"   {c}: در {len(ts)} از {len(cuts)} نقطه‌ی تست تفاوت داشت")
++        sys.exit(1)
++    print("✅ هیچ ستونی look-ahead نشان نداد.")
++
++
++if __name__ == "__main__":
++    main()
+diff -ruN '--exclude=__pycache__' orig/test_simulate_plan.py b/test_simulate_plan.py
+--- a/test_simulate_plan.py	1970-01-01 00:00:00.000000000 +0000
++++ b/test_simulate_plan.py	2026-10-10 20:48:40.074343193 +0000
+@@ -0,0 +1,36 @@
++"""تست واحد شبیه‌ساز: ورود باید open کندلِ بعد از سیگنال باشد، نه close همان کندل."""
++import numpy as np
++import pandas as pd
++
++from walk_forward_trade_plan import simulate_plan
++
++
++def _df(n=30):
++    idx = pd.date_range("2024-01-01", periods=n, freq="h")
++    close = np.full(n, 100.0)
++    return pd.DataFrame({
++        "open": np.full(n, 100.0), "high": np.full(n, 100.5), "low": np.full(n, 99.5),
++        "close": close, "ATR": np.full(n, 1.0), "ADX_14": np.full(n, 40.0),
++        "funding_rate": np.zeros(n), "symbol": "TEST"}, index=idx)
++
++
++def test_entry_is_next_open():
++    df = _df()
++    df.iloc[6, df.columns.get_loc("open")] = 101.0   # open کندل بعد از سیگنال
++    up = np.zeros(len(df)); up[5] = 1.0              # سیگنال در کندل 5
++    dn = np.zeros(len(df))
++    tr = simulate_plan(df, up, dn, 0.5, 0.5, 30, 1.5, 2.0, 4, 0.0, False)
++    assert tr, "باید معامله ساخته شود"
++    assert tr[0]["entry_time"] == df.index[6]
++    assert tr[0]["entry"] == 101.0
++
++
++def test_no_entry_on_last_candle():
++    df = _df()
++    up = np.zeros(len(df)); up[-1] = 1.0             # سیگنال در آخرین کندل: کندل بعدی وجود ندارد
++    tr = simulate_plan(df, up, np.zeros(len(df)), 0.5, 0.5, 30, 1.5, 2.0, 4, 0.0, False)
++    assert tr == []
++
++
++if __name__ == "__main__":
++    test_entry_is_next_open(); test_no_entry_on_last_candle(); print("✅ تست‌ها گذشت")
+diff -ruN '--exclude=__pycache__' orig/train_production_models.py b/train_production_models.py
+--- a/train_production_models.py	2026-10-10 20:47:26.182185912 +0000
++++ b/train_production_models.py	2026-10-10 20:48:21.630882550 +0000
+@@ -119,9 +119,22 @@
+         print("❌ اندازه‌ی بلوک holdout از کل داده بزرگ‌تر است.")
+         return
+ 
+-    X_train, X_hold = X.iloc[:split_idx], X.iloc[split_idx:]
+-    y_up_train, y_up_hold = y_up.iloc[:split_idx], y_up.iloc[split_idx:]
+-    y_dn_train, y_dn_hold = y_dn.iloc[:split_idx], y_dn.iloc[split_idx:]
++    # 🔒 embargo: ردیف‌های آخر Train که برچسبشان به دوره‌ی Holdout نگاه می‌کند حذف می‌شوند
++    #    (ردیف‌ها بین نمادها درهم‌اند → horizon × تعداد نماد)
++    n_sym = max(1, df["symbol"].nunique())
++    embargo = args.horizon * n_sym
++    train_end = split_idx - embargo
++    if train_end <= 0:
++        print("❌ داده برای embargo + holdout کافی نیست.")
++        return
++    # 🔒 Train داخلی (۸۵٪) / Validation داخلی (۱۵٪ آخر) فقط برای early stopping و آستانه
++    fit_end = int(train_end * 0.85)
++    val_start = fit_end + embargo
++
++    X_train, X_hold = X.iloc[:fit_end], X.iloc[split_idx:]
++    X_val = X.iloc[val_start:train_end]
++    y_up_train, y_up_val = y_up.iloc[:fit_end], y_up.iloc[val_start:train_end]
++    y_dn_train, y_dn_val = y_dn.iloc[:fit_end], y_dn.iloc[val_start:train_end]
+ 
+     use_funding = not args.no_funding
+     print("\n" + "=" * 100)
+@@ -137,20 +150,21 @@
+             n_estimators=300, learning_rate=0.05, num_leaves=31,
+             subsample=0.8, colsample_bytree=0.8, random_state=42, verbose=-1,
+         )
+-        m.fit(X_train, y_tr, eval_X=X_hold, eval_y=y_te,
++        m.fit(X_train, y_tr, eval_X=X_val, eval_y=y_te,
+               callbacks=[lgb.early_stopping(30, verbose=False)])
+         return m
+ 
+     print("\nآموزش مدل UP ...")
+-    up_model = _train(y_up_train, y_up_hold)
++    up_model = _train(y_up_train, y_up_val)
+     print("آموزش مدل DOWN ...")
+-    dn_model = _train(y_dn_train, y_dn_hold)
++    dn_model = _train(y_dn_train, y_dn_val)
+ 
+-    up_train_prob = up_model.predict_proba(X_train)[:, 1]
+-    dn_train_prob = dn_model.predict_proba(X_train)[:, 1]
+-    tau_up = float(np.quantile(up_train_prob, args.quantile))
+-    tau_dn = float(np.quantile(dn_train_prob, args.quantile))
+-    print(f"\nآستانه‌های سیگنال (چندک {args.quantile:g} Train):")
++    # 🔒 آستانه از احتمال‌های Validation (خارج از نمونه) — نه Train که overfit است
++    up_val_prob = up_model.predict_proba(X_val)[:, 1]
++    dn_val_prob = dn_model.predict_proba(X_val)[:, 1]
++    tau_up = float(np.quantile(up_val_prob, args.quantile))
++    tau_dn = float(np.quantile(dn_val_prob, args.quantile))
++    print(f"\nآستانه‌های سیگنال (چندک {args.quantile:g} Validation):")
+     print(f"  tau_up  = {tau_up:.4f}  (فقط اگر up_prob  >= این مقدار → LONG)")
+     print(f"  tau_dn  = {tau_dn:.4f}  (فقط اگر dn_prob  >= این مقدار → SHORT)")
+ 
+@@ -203,7 +217,10 @@
+         "fee": args.fee,
+         "use_funding": use_funding,
+         "symbols": symbols,
+-        "n_train": int(split_idx),
++        "n_train": int(fit_end),
++        "n_val": int(len(X_val)),
++        "embargo_rows": int(embargo),
++        "leak_fixed": True,  # ICS_26 حذف + تاخیر تأیید swing + ورود open بعدی
+         "n_holdout": int(args.holdout),
+         "feature_cols": list(feature_cols),
+         "tau_up": tau_up,
+diff -ruN '--exclude=__pycache__' orig/walk_forward_trade_plan.py b/walk_forward_trade_plan.py
+--- a/walk_forward_trade_plan.py	2026-10-10 20:47:26.182629606 +0000
++++ b/walk_forward_trade_plan.py	2026-10-10 20:48:01.892981108 +0000
+@@ -59,6 +59,8 @@
+     closes = df_symbol["close"].values
+     highs = df_symbol["high"].values
+     lows = df_symbol["low"].values
++    opens = (df_symbol["open"].values if "open" in df_symbol.columns
++             else closes)
+ 
+     atr = (df_symbol["ATR"].fillna(0).values
+            if "ATR" in df_symbol.columns else np.zeros(n))
+@@ -68,8 +70,22 @@
+ 
+     trades = []
+     pos = None  # dict: entry_idx, side, entry, sl, tp
++    pending = None  # سیگنالِ کندل قبل: (side, atr_سیگنال) — ورود در open کندل فعلی
+ 
+     for i in range(n):
++        # ---------- 🔒 ورود واقع‌بینانه: open کندلِ «بعد از» سیگنال ----------
++        # (قبلاً با close همان کندل سیگنال وارد می‌شد که در عمل ممکن نیست)
++        if pos is None and pending is not None:
++            side, sig_atr = pending
++            pending = None
++            entry = opens[i]
++            sd = sig_atr * atr_sl_mult
++            if entry > 0 and sd > 0:
++                sl = entry - sd if side == "long" else entry + sd
++                tp = entry + sd * risk_reward if side == "long" else entry - sd * risk_reward
++                pos = {"entry_idx": i, "side": side,
++                       "entry": entry, "sl": sl, "tp": tp}
++
+         # ---------- خروج پوزیشن باز ----------
+         if pos is not None:
+             side = pos["side"]
+@@ -139,13 +155,8 @@
+             else:
+                 side = None
+ 
+-            if side is not None:
+-                entry = closes[i]
+-                sd = atr[i] * atr_sl_mult
+-                sl = entry - sd if side == "long" else entry + sd
+-                tp = entry + sd * risk_reward if side == "long" else entry - sd * risk_reward
+-                pos = {"entry_idx": i, "side": side,
+-                       "entry": entry, "sl": sl, "tp": tp}
++            if side is not None and i + 1 < n:
++                pending = (side, atr[i])
+ 
+     return trades
+ 
+@@ -169,34 +180,45 @@
+ 
+ def run_window(df, X, y_up, y_dn, start, train_size, test_size, horizon,
+                quantile, min_adx, atr_sl_mult, risk_reward, fee,
+-               use_funding, lgb):
++               use_funding, lgb, embargo=0):
++    # 🔒 embargo: فاصله‌ی بین آخرین ردیف Train و اولین ردیف Test تا برچسب‌های
++    # Train (که به horizon کندل آینده نگاه می‌کنند) با دوره‌ی Test هم‌پوشانی نکنند.
+     train_idx = slice(start, start + train_size)
+-    test_idx = slice(start + train_size, start + train_size + test_size)
++    test_start = start + train_size + embargo
++    test_idx = slice(test_start, test_start + test_size)
++
++    # 🔒 Train داخلی (۸۵٪) + Validation داخلی (۱۵٪ آخر Train، با embargo)
++    # برای early stopping و آستانه — دیگر هیچ چیز از Test دیده نمی‌شود.
++    fit_end = start + int(train_size * 0.85)
++    val_start = min(fit_end + embargo, start + train_size - 1)
++    fit_idx = slice(start, fit_end)
++    val_idx = slice(val_start, start + train_size)
+ 
+     X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+-    y_up_train, y_up_test = y_up.iloc[train_idx], y_up.iloc[test_idx]
+-    y_dn_train, y_dn_test = y_dn.iloc[train_idx], y_dn.iloc[test_idx]
+     test_df = df.iloc[test_idx].copy()
+ 
+-    def _train(y_tr, y_te):
++    X_fit, X_val = X.iloc[fit_idx], X.iloc[val_idx]
++
++    def _train(y_all):
+         m = lgb.LGBMClassifier(
+             n_estimators=300, learning_rate=0.05, num_leaves=31,
+             subsample=0.8, colsample_bytree=0.8, random_state=42, verbose=-1,
+         )
+-        m.fit(X_train, y_tr, eval_X=X_test, eval_y=y_te,
++        m.fit(X_fit, y_all.iloc[fit_idx], eval_X=X_val, eval_y=y_all.iloc[val_idx],
+               callbacks=[lgb.early_stopping(30, verbose=False)])
+         return m
+ 
+-    up_model = _train(y_up_train, y_up_test)
+-    dn_model = _train(y_dn_train, y_dn_test)
++    up_model = _train(y_up)
++    dn_model = _train(y_dn)
+ 
+-    up_train_prob = up_model.predict_proba(X_train)[:, 1]
+-    dn_train_prob = dn_model.predict_proba(X_train)[:, 1]
++    up_val_prob = up_model.predict_proba(X_val)[:, 1]
++    dn_val_prob = dn_model.predict_proba(X_val)[:, 1]
+     up_test_prob = up_model.predict_proba(X_test)[:, 1]
+     dn_test_prob = dn_model.predict_proba(X_test)[:, 1]
+ 
+-    tau_up = float(np.quantile(up_train_prob, quantile))
+-    tau_dn = float(np.quantile(dn_train_prob, quantile))
++    # 🔒 آستانه از احتمال‌های «خارج از نمونه‌ی Validation» (نه Train که overfit است)
++    tau_up = float(np.quantile(up_val_prob, quantile))
++    tau_dn = float(np.quantile(dn_val_prob, quantile))
+ 
+     trades = []
+     for symbol in test_df["symbol"].unique():
+@@ -247,6 +269,8 @@
+     parser.add_argument("--step", type=int, default=1000)
+     parser.add_argument("--windows", type=int, default=5)
+     parser.add_argument("--fee", type=float, default=DEFAULT_FEE)
++    parser.add_argument("--embargo", type=int, default=None,
++                        help="فاصله‌ی Train→Test به ردیف (پیش‌فرض: horizon × تعداد نماد)")
+     parser.add_argument("--no-funding", action="store_true")
+     parser.add_argument("--summary-only", action="store_true",
+                         help="فقط جمع‌بندی + تفکیک سال‌به‌سال (بدون جزئیات هر پنجره)")
+@@ -306,15 +330,19 @@
+     else:
+         def _pprint(*a, **k):
+             print(*a, **k)
++    n_sym = max(1, df["symbol"].nunique())
++    # ردیف‌ها بین نمادها درهم‌اند؛ embargo = بزرگ‌ترین افق × تعداد نماد
++    embargo = args.embargo if args.embargo is not None else args.horizon * n_sym
++    print(f"• embargo بین Train و Test: {embargo} ردیف | ورود: open کندل بعد از سیگنال")
+     start = 0
+     window_num = 0
+-    while (start + args.train_size + args.test_size <= n) and (window_num < args.windows):
++    while (start + args.train_size + embargo + args.test_size <= n) and (window_num < args.windows):
+         window_num += 1
+         try:
+             r = run_window(df, X, y_up, y_dn, start, args.train_size,
+                            args.test_size, args.horizon, args.quantile,
+                            args.min_adx, args.atr_sl_mult, args.risk_reward,
+-                           args.fee, use_funding, lgb)
++                           args.fee, use_funding, lgb, embargo=embargo)
+         except Exception as e:
+             logger.error(f"پنجره {window_num}: خطا — {e}")
+             start += args.step
